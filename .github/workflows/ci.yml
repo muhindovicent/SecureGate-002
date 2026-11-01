@@ -1,0 +1,39 @@
+name: SecureGate checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6-bookworm
+        env:
+          POSTGRES_DB: securegate
+          POSTGRES_USER: securegate
+          POSTGRES_PASSWORD: ci-ephemeral-only
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U securegate -d securegate"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://securegate:ci-ephemeral-only@localhost:5432/securegate
+      APP_ORIGIN: http://localhost:5173
+      NODE_ENV: development
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: node -e "require('fs').appendFileSync(process.env.GITHUB_ENV,'CREDENTIAL_KEY='+require('crypto').randomBytes(32).toString('hex')+'\n')"
+      - run: npm ci --ignore-scripts
+      - run: npm run db:generate
+      - run: npm run db:migrate
+      - run: npm run db:seed
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:integration
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser

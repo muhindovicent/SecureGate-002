@@ -1,0 +1,47 @@
+{
+  "name": "securegate",
+  "version": "0.2.0",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "setup": "node development.mjs setup",
+    "dev": "node development.mjs dev",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate deploy",
+    "db:seed": "tsx --tsconfig apps/api/tsconfig.json apps/api/backend.ts seed",
+    "build": "npm run build --workspaces",
+    "typecheck": "tsc --noEmit -p apps/api && tsc --noEmit -p apps/web",
+    "test": "tsx --tsconfig apps/api/tsconfig.json --test tests/*.test.ts",
+    "test:integration": "node tests/run-integration.mjs",
+    "test:browser": "node tests/run-integration.mjs browser",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/cookie-parser": "1.4.9",
+    "@types/express": "5.0.5",
+    "@types/node": "24.10.0",
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.2",
+    "@vitejs/plugin-react": "6.1.2",
+    "prettier": "3.9.10",
+    "prisma": "6.19.3",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vite": "8.3.5"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.3"
+  },
+  "overrides": {
+    "deepmerge-ts": "8.0.2",
+    "multer": "2.5.0",
+    "js-yaml": "5.5.0"
+  }
+}

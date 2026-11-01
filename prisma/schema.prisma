@@ -1,0 +1,272 @@
+generator client {
+  provider = "prisma-client-js"
+  engineType = "client"
+}
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+}
+enum Role {
+ STUDENT
+ OFFICER
+ VERIFIER
+ SUPERVISOR
+ REGISTRAR
+ ADMIN
+ MANAGEMENT
+ AUDITOR
+}
+enum CredentialStatus {
+ ACTIVE
+ SUSPENDED
+ REVOKED
+ EXPIRED
+}
+enum GadgetStatus {
+ PENDING
+ APPROVED
+ REJECTED
+ RETIRED
+ LOST
+}
+enum Direction {
+ ENTRY
+ EXIT
+}
+enum Lane {
+ EXPRESS
+ GADGET
+}
+enum PassageMode {
+ ASSISTED
+ REGISTRATION_ONLY
+}
+enum IncidentStatus {
+ OPEN
+ UNDER_REVIEW
+ RESOLVED
+ CLOSED
+}
+enum AuthStage {
+ FULL
+ MFA_REQUIRED
+ MFA_SETUP_REQUIRED
+}
+model User {
+ id String @id @default(uuid()) @db.Uuid
+ email String @unique
+ name String
+ passwordHash String
+ mfaSecretEncrypted String?
+ mfaLastStep BigInt?
+ recoveryCodes MfaRecoveryCode[]
+ role Role
+ active Boolean @default(true)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ student Student?
+ sessions Session[]
+ assignments Assignment[]
+}
+model Session {
+ id String @id
+ userId String @db.Uuid
+ user User @relation(fields:[userId],references:[id])
+ csrf String
+ stage AuthStage @default(FULL)
+ mfaPendingSecret String?
+ mfaPendingExpiresAt DateTime? @db.Timestamptz(3)
+ mfaVerifiedAt DateTime? @db.Timestamptz(3)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ expiresAt DateTime @db.Timestamptz(3)
+ @@index([expiresAt])
+}
+model Student {
+ id String @id @default(uuid()) @db.Uuid
+ userId String @unique @db.Uuid
+ user User @relation(fields:[userId],references:[id])
+ registration String @unique
+ program String
+ enrollment String @default("ACTIVE")
+ photoUrl String?
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ credentials Credential[]
+ gadgets Gadget[]
+ visits Visit[]
+ movements Movement[]
+ incidents Incident[]
+}
+model Credential {
+ id String @id @default(uuid()) @db.Uuid
+ studentId String @db.Uuid
+ student Student @relation(fields:[studentId],references:[id])
+ digest String @unique
+ status CredentialStatus @default(ACTIVE)
+ issuedAt DateTime @default(now()) @db.Timestamptz(3)
+ expiresAt DateTime @db.Timestamptz(3)
+ revokedAt DateTime? @db.Timestamptz(3)
+ movements Movement[]
+ @@index([studentId,status])
+}
+model Gadget {
+ id String @id @default(uuid()) @db.Uuid
+ studentId String @db.Uuid
+ student Student @relation(fields:[studentId],references:[id])
+ category String
+ manufacturer String
+ model String
+ serial String
+ status GadgetStatus @default(PENDING)
+ verifiedBy String? @db.Uuid
+ verifiedAt DateTime? @db.Timestamptz(3)
+ decisionReason String?
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ visits VisitGadget[]
+ custody Custody[]
+ @@index([serial])
+ @@index([studentId,status])
+}
+model Custody {
+ id String @id @default(uuid()) @db.Uuid
+ gadgetId String @db.Uuid
+ gadget Gadget @relation(fields:[gadgetId],references:[id])
+ custodianId String @db.Uuid
+ approvedBy String @db.Uuid
+ startsAt DateTime @db.Timestamptz(3)
+ endsAt DateTime @db.Timestamptz(3)
+ revoked Boolean @default(false)
+}
+model Terminal {
+ id String @id @default(uuid()) @db.Uuid
+ name String
+ gate String
+ direction Direction
+ lane Lane
+ mode PassageMode @default(ASSISTED)
+ active Boolean @default(true)
+ lastSeen DateTime? @db.Timestamptz(3)
+ assignments Assignment[]
+ movements Movement[]
+}
+model Assignment {
+ userId String @db.Uuid
+ terminalId String @db.Uuid
+ user User @relation(fields:[userId],references:[id])
+ terminal Terminal @relation(fields:[terminalId],references:[id])
+ @@id([userId,terminalId])
+}
+model Visit {
+ id String @id @default(uuid()) @db.Uuid
+ studentId String @db.Uuid
+ student Student @relation(fields:[studentId],references:[id])
+ enteredAt DateTime @default(now()) @db.Timestamptz(3)
+ exitedAt DateTime? @db.Timestamptz(3)
+ movements Movement[]
+ gadgets VisitGadget[]
+ @@index([studentId,enteredAt])
+}
+model VisitGadget {
+ visitId String @db.Uuid
+ gadgetId String @db.Uuid
+ visit Visit @relation(fields:[visitId],references:[id])
+ gadget Gadget @relation(fields:[gadgetId],references:[id])
+ exitedAt DateTime? @db.Timestamptz(3)
+ @@id([visitId,gadgetId])
+}
+model Movement {
+ id String @id @default(uuid()) @db.Uuid
+ studentId String @db.Uuid
+ student Student @relation(fields:[studentId],references:[id])
+ credentialId String @db.Uuid
+ credential Credential @relation(fields:[credentialId],references:[id])
+ terminalId String @db.Uuid
+ terminal Terminal @relation(fields:[terminalId],references:[id])
+ operatorId String @db.Uuid
+ direction Direction
+ confirmed Boolean
+ outcome String
+ visitId String? @db.Uuid
+ visit Visit? @relation(fields:[visitId],references:[id])
+ gadgetIds String[] @db.Uuid
+ durationMs Int
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ @@index([studentId,createdAt])
+ @@index([terminalId,createdAt])
+}
+model Scan {
+ id String @id @db.Uuid
+ actorId String @db.Uuid
+ fingerprint String
+ response Json
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+}
+model Incident {
+ id String @id @default(uuid()) @db.Uuid
+ category String
+ severity String @default("MEDIUM")
+ description String
+ studentId String? @db.Uuid
+ student Student? @relation(fields:[studentId],references:[id])
+ reporterId String @db.Uuid
+ status IncidentStatus @default(OPEN)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ actions IncidentAction[]
+ overrides Override[]
+ @@index([studentId,createdAt])
+}
+model IncidentAction {
+ id String @id @default(uuid()) @db.Uuid
+ incidentId String @db.Uuid
+ incident Incident @relation(fields:[incidentId],references:[id])
+ actorId String @db.Uuid
+ status IncidentStatus
+ note String
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+}
+model Override {
+ id String @id @default(uuid()) @db.Uuid
+ incidentId String @db.Uuid
+ incident Incident @relation(fields:[incidentId],references:[id])
+ requestedBy String @db.Uuid
+ reason String
+ status String @default("PENDING")
+ decidedBy String? @db.Uuid
+ decisionReason String?
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+}
+model Audit {
+ id String @id @default(uuid()) @db.Uuid
+ actorId String? @db.Uuid
+ action String
+ resourceId String?
+ details Json
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ @@index([createdAt])
+}
+model Notification {
+ id String @id @default(uuid()) @db.Uuid
+ userId String @db.Uuid
+ message String
+ read Boolean @default(false)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ @@index([userId,createdAt])
+}
+model Setting {
+ key String @id
+ value Json
+}
+
+model MfaRecoveryCode {
+ id String @id @default(uuid()) @db.Uuid
+ userId String @db.Uuid
+ user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+ digest String @unique
+ usedAt DateTime? @db.Timestamptz(3)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ @@index([userId,usedAt])
+}
+model AuthThrottle {
+ id String @id
+ count Int
+ windowEnds DateTime @db.Timestamptz(3)
+ @@index([windowEnds])
+}
