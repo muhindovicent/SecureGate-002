@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: securegate-002
+    runtime: node
+    buildCommand: npm ci --ignore-scripts && npm run db:generate && npm run build --workspace @securegate/api
+    startCommand: npm start
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DEPLOYMENT_MODE
+        value: web-preview
+      - key: APP_ORIGIN
+        value: https://secure-gate-002.vercel.app
+      - key: DATABASE_URL
+        sync: false
+      - key: CREDENTIAL_KEY
+        sync: false
+      - key: INSTITUTION_NAME
+        value: Cavendish University

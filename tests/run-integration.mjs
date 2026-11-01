@@ -24,10 +24,10 @@ const testEnv = {
       }
     : {}),
 };
-function run(command, args) {
+function run(command, args, env = testEnv) {
   const r = spawnSync(command, args, {
     stdio: "inherit",
-    env: testEnv,
+    env,
     shell: process.platform === "win32",
   });
   if (r.status !== 0) throw new Error("Test command failed");
@@ -39,6 +39,10 @@ try {
   const npx = process.platform === "win32" ? "npx.cmd" : "npx";
   run(npx, ["prisma", "migrate", "deploy"]);
   if (browser) {
+    run(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build"], {
+      ...testEnv,
+      NODE_ENV: "production",
+    });
     run(npx, [
       "tsx",
       "--tsconfig",

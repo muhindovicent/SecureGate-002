@@ -55,7 +55,32 @@ export const db = new PrismaClient({
 });
 const key = process.env.CREDENTIAL_KEY;
 const production = process.env.NODE_ENV === "production";
-const origin = process.env.APP_ORIGIN || "http://localhost:5173";
+export function resolveWebOrigin(env: NodeJS.ProcessEnv = process.env) {
+  const hosted = env.NODE_ENV === "production" || env.RENDER === "true";
+  const configured = env.APP_ORIGIN?.trim();
+  if (!configured) {
+    if (hosted) throw new Error("APP_ORIGIN must be the public HTTPS frontend origin");
+    return "http://localhost:5173";
+  }
+  const url = new URL(configured);
+  if (
+    url.username || url.password || url.pathname !== "/" || url.search || url.hash ||
+    !["http:", "https:"].includes(url.protocol)
+  ) throw new Error("APP_ORIGIN must contain only a scheme and hostname, without a path");
+  const host = url.hostname.toLowerCase();
+  const loopback = host === "localhost" || host.endsWith(".localhost") ||
+    host === "[::1]" || host === "0.0.0.0" || /^127\./.test(host);
+  if (hosted && (url.protocol !== "https:" || loopback))
+    throw new Error("Hosted APP_ORIGIN must use HTTPS and cannot point to localhost");
+  return url.origin;
+}
+const origin = resolveWebOrigin();
+const sessionCookieOptions = {
+  httpOnly: true,
+  sameSite: "strict" as const,
+  secure: production || origin.startsWith("https://"),
+  path: "/api",
+};
 const uuid = z.string().uuid();
 const text = z.string().trim().min(2).max(500);
 const studentNumber = z.string().trim().regex(/^\d{4,20}$/, "Use a 4–20 digit student ID number");
@@ -337,11 +362,8 @@ function sessionCookie(
   session: { token: string; lifetime: number },
 ) {
   res.cookie("sg_session", session.token, {
-    httpOnly: true,
-    sameSite: "strict",
-    secure: production,
+    ...sessionCookieOptions,
     maxAge: session.lifetime,
-    path: "/api",
   });
 }
 /** Atomic quotas persist across restarts and API instances. Keys contain no raw email/IP. */
@@ -488,7 +510,7 @@ class Api {
       status: "ok",
       database: "connected",
       institution: process.env.INSTITUTION_NAME || "Demo University",
-      mode: production ? "production" : "synthetic-development",
+      mode: production ? "web-preview" : "synthetic-development",
     };
   }
   @Post("auth/login") async login(
@@ -546,7 +568,7 @@ class Api {
   ) {
     const c = await actor(req, undefined, true);
     await db.session.delete({ where: { id: c.session.id } });
-    res.clearCookie("sg_session", { path: "/api" });
+    res.clearCookie("sg_session", sessionCookieOptions);
     return { ok: true };
   }
   @Post("auth/mfa/setup") async mfaSetup(
@@ -1748,11 +1770,20 @@ class AppModule {}
 export async function start() {
   if (!key || key.length < 64)
     throw new Error("Run npm run setup: CREDENTIAL_KEY is required");
-  if (production)
+  if (production && process.env.DEPLOYMENT_MODE !== "web-preview")
     throw new Error(
-      "Production startup is intentionally blocked pending verified photographs, managed-terminal identity and institutional security review. See README.",
+      "Production transport requires DEPLOYMENT_MODE=web-preview. Physical gate deployment remains unavailable. See README.",
     );
   const app = await NestFactory.create(AppModule, { bodyParser: false });
+  if (process.env.RENDER === "true")
+    app.getHttpAdapter().getInstance().set("trust proxy", 1);
+  app.enableCors({
+    origin,
+    credentials: true,
+    methods: ["GET", "POST", "PATCH", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "X-CSRF-Token"],
+    maxAge: 600,
+  });
   const express = await import("express");
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(express.json({ limit: "32kb" }));

@@ -129,7 +129,7 @@ The seeded student has no verified photograph. The placeholder is explicitly lab
 - [ ] Separate least-privilege runtime database user, external tamper-evident audit storage and tested recovery procedures.
 - [ ] Independent security review, accessibility audit, lawful-processing assessment and university authorization.
 
-These are explicit remaining requirements, not implied completed features. In particular this release is **not** the complete production system in the original brief. The next milestone is verified identity photographs and managed-terminal authentication before a controlled institutional pilot. `NODE_ENV=production` intentionally refuses to start until those requirements are implemented and reviewed.
+These are explicit remaining requirements, not implied completed features. In particular this release is **not** the complete production system in the original brief. The next milestone is verified identity photographs and managed-terminal authentication before a controlled institutional pilot. Hosted HTTPS transport is available with `NODE_ENV=production` and `DEPLOYMENT_MODE=web-preview`; this remains a browser simulator, not physical gate deployment.
 
 ## Requirements and product behavior
 
@@ -301,6 +301,42 @@ Performance numbers in dashboards come from persisted records. The capacity plan
 
 ## Operations, deployment and pilot acceptance
 
+### Vercel frontend and Render API
+
+The browser always calls the relative **`/api/v1`** path with same-origin credentials. `VITE_API_URL` may be unset or set to `/api/v1`; an absolute Render URL or localhost value is rejected at build time. The Vite development proxy exists only while Vite runs. A static Vercel deployment needs the committed API rewrite and SPA fallback.
+
+The root `vercel.json` builds the web workspace and serves `apps/web/dist`. The existing Vercel project uses Root Directory **`apps/web`**, so `apps/web/vercel.json` provides the equivalent configuration for that layout. Both put `/api/:path*` forwarding to `https://securegate-002.onrender.com/api/:path*` before the `/index.html` SPA fallback. This preserves `/login` and direct dashboard navigation on reload. If the Render service address changes, update the destination in both files together.
+
+Render's `render.yaml` records the API build/start command and `/api/v1/health` health check. Startup does not run database migrations or seed records. Schema deployment is a separate operator-controlled step. For the existing service, apply these settings in its dashboard and redeploy:
+
+| Setting | Value |
+| --- | --- |
+| Build command | `npm ci --ignore-scripts && npm run db:generate && npm run build --workspace @securegate/api` |
+| Start command | `npm start` |
+| `NODE_ENV` | `production` |
+| `DEPLOYMENT_MODE` | `web-preview` |
+| `APP_ORIGIN` | `https://secure-gate-002.vercel.app` |
+| `DATABASE_URL` | The service's PostgreSQL connection string, supplied privately |
+| `CREDENTIAL_KEY` | The existing stable secret of at least 64 characters, supplied privately |
+
+Render supplies `PORT`; Nest binds to `0.0.0.0`. Hosted startup requires an explicit public HTTPS `APP_ORIGIN` and rejects localhost. Nest's CORS response allows only that exact origin with credentials, the required methods and `Content-Type`/`X-CSRF-Token` headers. Writes still require the exact Origin and a valid session CSRF token. `DEPLOYMENT_MODE=web-preview` enables production HTTP transport for this simulator; it does not bypass account checks, student verification, staff MFA or role permissions. Synthetic seeding remains blocked under `NODE_ENV=production`.
+
+The API's session cookie is **HttpOnly, Secure, SameSite=Strict, host-only, Path=/api** on hosted HTTPS. Vercel forwards it as a first-party cookie on the frontend hostname, including Set-Cookie from login, MFA rotation and logout. This avoids third-party-cookie dependence in Safari. Do not point the browser directly at the unrelated `onrender.com` origin or change the cookie to `SameSite=None` as a workaround. Keep `CREDENTIAL_KEY` stable across API restarts and instances, and share PostgreSQL; sessions already reside in PostgreSQL and need no sticky routing.
+
+After deploying both services, `https://securegate-002.onrender.com/api/v1/health` and `https://secure-gate-002.vercel.app/api/v1/health` must both return the API's JSON health response, and `/login` must return the SPA. A Vercel `NOT_FOUND` response identifies routing; a Render 503/timeout identifies backend startup, availability or database connectivity. Use Render's service logs to distinguish those backend failures. The frontend now reports routing/outage errors separately from rejected credentials. Accounts created in a local PostgreSQL database are not automatically present in Render's database.
+
+The root `npm start` command also starts the API workspace after building. On 2026-11-01 the frontend routing fix was published to `https://secure-gate-002.vercel.app` (deployment `dpl_8oqoBg7de2FwZd3SGL1vevCDuWAp`), and `/login` returned HTTP 200 with the updated bundle. The forwarded health request still timed out because the Render service was unavailable. Live authenticated login therefore remains unverified until the backend changes are deployed with the settings above and Render health returns JSON. Private Render startup logs were not available during this investigation.
+
+### Mobile login investigation and regression coverage
+
+The deployed failure was reproduced on 2026-11-01 in desktop Chromium, Android Chrome emulation and iPhone WebKit emulation. All three sent `POST https://secure-gate-002.vercel.app/api/v1/auth/login` and received **Vercel 404 text**, and direct `/login` requests also returned 404. Render's direct health check timed out and also returned 503 during investigation. The Vercel project had no production environment variables and its deployed bundle used a relative API URL. The confirmed cause was missing deployed API/SPA routing, with an additional unhealthy Render service; a mobile-only password or cookie bug was not reproduced.
+
+`npm run test:mobile` builds the application and tests desktop Chromium, Pixel/Android Chromium and iPhone WebKit against real NestJS and an isolated PostgreSQL database through an HTTPS same-origin proxy matching the committed rewrite order. It checks wrong/correct login, session persistence after direct navigation/reload, Secure/HttpOnly/Strict cookie headers, logout, staff MFA/recovery rotation, CSRF rejection, role restrictions, own-student data and backend-outage feedback. No authentication secrets or TLS keys are committed; test certificates are generated under an ignored temporary directory and deleted with the test database. Browser certificate bypass is limited to that isolated self-signed test environment. These are browser-engine/device-emulation tests, not physical handset tests.
+
+Install Chromium and WebKit once with `npx playwright install chromium webkit` (`--with-deps` on Linux). OpenSSL is required for the isolated TLS fixture; Windows defaults to Git for Windows' OpenSSL, or set `OPENSSL_EXECUTABLE`. Existing browser tests continue to cover all eight role dashboards. CI runs both suites.
+
+`npm run test:browser` builds production frontend assets, then starts the compiled API and static Vite preview together through `tests/browser-server.mjs`. This avoids nested npm/watch process startup on Windows. The server checks for an isolated `sg_test_*` database before starting; test migrations and fixture seeding apply only to that disposable database.
+
 ### Local troubleshooting
 
 - Docker unavailable: start Docker Desktop/managed Docker; do not replace PostgreSQL with an in-memory store.
@@ -316,6 +352,6 @@ Use PostgreSQL `pg_dump -Fc` with a password supplied securely through the envir
 
 ### Deployment gates
 
-Production startup is deliberately blocked. Before removing that block: review and approve the implemented MFA controls and complete institutional account recovery, verified photographs, approved SSO/import if needed, cryptographic terminal enrollment, HTTPS/cookie/CSP settings, secret rotation, least-privilege database roles, append-only external audit export, approved retention/access/export workflows, monitored backup/restore, load and outage tests, accessibility review, incident response and institutional authorization. Docker Compose here is a local development database configuration, not a production deployment manifest.
+Hosted browser previews require `DEPLOYMENT_MODE=web-preview`; physical gate deployment remains unavailable. Before a real pilot: review the implemented MFA controls and complete institutional account recovery, verified photographs, approved SSO/import if needed, cryptographic terminal enrollment, final CSP, secret rotation, least-privilege database roles, external audit export, approved retention/access/export workflows, monitored backup/restore, load and outage tests, accessibility review, incident response and institutional authorization. Docker Compose remains a local database configuration; Vercel and Render transport settings are described above.
 
 Pilot acceptance requires observed successful enrollment/issuance, revoked credential rejection, no duplicate visits under concurrency, accurate actual-gadget selection and exit reconciliation, role isolation, attributable incidents/reviews, honest unconfirmed-presence displays, approved emergency/manual operation, reviewed governance and passing tests. Unknown university procedures remain dependencies, not fabricated integrations.

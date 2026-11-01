@@ -11,5 +11,5 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["frontend.tsx", "vite.config.ts"]
+  "include": ["frontend.tsx", "vite.config.ts", "vite-env.d.ts"]
 }

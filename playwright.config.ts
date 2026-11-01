@@ -25,7 +25,7 @@ export default defineConfig({
     trace: "off",
   },
   webServer: {
-    command: "npm run dev",
+    command: "node tests/browser-server.mjs",
     url: "http://localhost:5174/api/v1/health",
     reuseExistingServer: false,
     timeout: 30000,

@@ -68,24 +68,41 @@ const client = new QueryClient({
   defaultOptions: { queries: { retry: false, refetchOnWindowFocus: true } },
 });
 let csrf = "";
+const apiBase = import.meta.env.VITE_API_URL || "/api/v1";
 async function api(path: string, method = "GET", body?: unknown) {
-  const r = await fetch("/api/v1/" + path, {
-    method,
-    credentials: "same-origin",
-    headers: {
-      ...(body ? { "Content-Type": "application/json" } : {}),
-      "x-csrf-token": csrf,
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-  let result;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 60000);
   try {
-    result = await r.json();
-  } catch {
-    throw new Error("Network unavailable. No movement has been confirmed.");
+    let r: Response;
+    try {
+      r = await fetch(apiBase + "/" + path, {
+        method,
+        credentials: "same-origin",
+        signal: controller.signal,
+        headers: {
+          ...(body ? { "Content-Type": "application/json" } : {}),
+          "x-csrf-token": csrf,
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      });
+    } catch {
+      throw new Error(
+        "Unable to reach the SecureGate API. Check your connection and try again.",
+      );
+    }
+    let result;
+    try {
+      result = await r.json();
+    } catch {
+      throw new Error(
+        `SecureGate API is unavailable (HTTP ${r.status}). Check the deployment's /api routing and backend health.`,
+      );
+    }
+    if (!r.ok) throw new Error(result.message || "Request failed");
+    return result;
+  } finally {
+    window.clearTimeout(timeout);
   }
-  if (!r.ok) throw new Error(result.message || "Request failed");
-  return result;
 }
 const date = (s: string) =>
   new Intl.DateTimeFormat("en-UG", {
@@ -342,6 +359,9 @@ function Form({
               type={f.type || "text"}
               {...register(f.name)}
               inputMode={f.inputMode}
+              autoCapitalize={f.autoComplete === "username" ? "none" : undefined}
+              autoCorrect={f.autoComplete === "username" ? "off" : undefined}
+              spellCheck={f.autoComplete === "username" ? false : undefined}
               autoComplete={
                 f.autoComplete || (f.type === "password" ? "new-password" : "off")
               }

@@ -11,6 +11,7 @@
   "scripts": {
     "setup": "node development.mjs setup",
     "dev": "node development.mjs dev",
+    "start": "npm run start --workspace @securegate/api",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate deploy",
     "db:seed": "tsx --tsconfig apps/api/tsconfig.json apps/api/backend.ts seed",
@@ -19,6 +20,7 @@
     "test": "tsx --tsconfig apps/api/tsconfig.json --test tests/*.test.ts",
     "test:integration": "node tests/run-integration.mjs",
     "test:browser": "node tests/run-integration.mjs browser",
+    "test:mobile": "npm run build && node tests/mobile-auth.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },

@@ -13,7 +13,15 @@ import {
   studentEmailMatches,
   sealQrCredential,
   openQrCredential,
+  resolveWebOrigin,
 } from "../apps/api/backend";
+test("hosted authentication requires an explicit HTTPS origin and never falls back to localhost", () => {
+  assert.equal(resolveWebOrigin({ NODE_ENV: "development" }), "http://localhost:5173");
+  assert.equal(resolveWebOrigin({ NODE_ENV: "production", APP_ORIGIN: "https://secure-gate-002.vercel.app/" }), "https://secure-gate-002.vercel.app");
+  for (const APP_ORIGIN of [undefined, "http://secure-gate-002.vercel.app", "https://localhost", "https://127.0.0.1", "https://[::1]", "https://secure-gate-002.vercel.app/login", "https://user:password@example.com"])
+    assert.throws(() => resolveWebOrigin({ NODE_ENV: "production", APP_ORIGIN }));
+  assert.throws(() => resolveWebOrigin({ NODE_ENV: "development", RENDER: "true" }));
+});
 test("individual password hashes are salted and reject wrong passwords", () => {
   const a = hashPassword("a strong individual passphrase");
   const b = hashPassword("a strong individual passphrase");
