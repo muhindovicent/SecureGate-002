@@ -258,6 +258,8 @@ type Field = {
   options?: Array<string | { value: string; label: string }>;
   required?: boolean;
   minLength?: number;
+  inputMode?: "numeric";
+  autoComplete?: string;
 };
 function Form({
   fields,
@@ -339,7 +341,10 @@ function Form({
               aria-label={f.label}
               type={f.type || "text"}
               {...register(f.name)}
-              autoComplete={f.type === "password" ? "new-password" : "off"}
+              inputMode={f.inputMode}
+              autoComplete={
+                f.autoComplete || (f.type === "password" ? "new-password" : "off")
+              }
             />
           )}{" "}
           {f.type === "checkbox" && f.label}
@@ -456,14 +461,18 @@ function RecoveryCodes({
   );
 }
 function MfaEnrollment({
+  accountEmail,
   partial = false,
   onComplete,
 }: {
+  accountEmail: string;
   partial?: boolean;
   onComplete: (session: any) => Promise<void>;
 }) {
   const [setup, setSetup] = useState<any>(null),
-    [completed, setCompleted] = useState<any>(null);
+    [completed, setCompleted] = useState<any>(null),
+    [copied, setCopied] = useState(false),
+    [copyError, setCopyError] = useState("");
   if (completed)
     return (
       <RecoveryCodes
@@ -494,16 +503,71 @@ function MfaEnrollment({
         />
       ) : (
         <>
+          <ol className="mfa-instructions">
+            <li>
+              Open Google Authenticator, Microsoft Authenticator, or another TOTP
+              authenticator app on your phone.
+            </li>
+            <li>
+              Choose Add account, then Scan a QR code inside that app. In
+              Microsoft Authenticator, choose Other account.
+            </li>
+            <li>
+              Scan the QR below, then enter the six-digit code shown for{" "}
+              <strong>{accountEmail}</strong>.
+            </li>
+          </ol>
           <div className="authenticator-qr">
-            <QRCodeSVG value={setup.uri} size={180} />
+            <QRCodeSVG
+              value={setup.uri}
+              size={256}
+              marginSize={4}
+              level="M"
+              role="img"
+              aria-label="Scan with your authenticator app to add this account"
+            />
           </div>
           <p className="body-copy">
-            Scan this QR with your authenticator app. If you cannot scan it,
-            enter this setup key manually:
+            This QR adds an account to your authenticator; it is not a website
+            link. Use the scanner inside the authenticator app, rather than your
+            phone’s normal camera or the campus checkpoint scanner.
+          </p>
+          <h3>Can’t scan the QR?</h3>
+          <p className="body-copy">
+            In your authenticator, choose Enter a setup key. Use{" "}
+            <strong>{accountEmail}</strong> as the account name, paste the key
+            below, and select <strong>Time based (TOTP)</strong>. This also works
+            when you are viewing SecureGate on the same phone.
           </p>
           <code className="setup-key" aria-label="Authenticator setup key">
             {setup.secret}
           </code>
+          <div className="mfa-key-actions">
+            <button
+              type="button"
+              className="secondary"
+              onClick={async () => {
+                setCopyError("");
+                try {
+                  await navigator.clipboard.writeText(setup.secret);
+                  setCopied(true);
+                } catch {
+                  setCopyError(
+                    "Select the setup key above and copy it manually.",
+                  );
+                }
+              }}
+            >
+              Copy setup key
+            </button>
+            <span role="status">{copied ? "Setup key copied." : ""}</span>
+          </div>
+          {copyError && <Notice error>{copyError}</Notice>}
+          <p className="body-copy">
+            Your app generates a new six-digit code every 30 seconds. There is no
+            fixed code shared by a role. Complete setup within five minutes of
+            signing in; if it expires, cancel and sign in again for a fresh QR.
+          </p>
           <Form
             invalidate={false}
             fields={[
@@ -511,11 +575,15 @@ function MfaEnrollment({
                 name: "code",
                 label: "Six-digit authenticator code",
                 minLength: 6,
+                inputMode: "numeric",
+                autoComplete: "one-time-code",
               },
             ]}
             submit="Confirm authenticator"
             onSubmit={async (d) => {
-              const result = await api("auth/mfa/confirm", "POST", d);
+              const result = await api("auth/mfa/confirm", "POST", {
+                code: d.code.replace(/\s/g, ""),
+              });
               csrf = result.csrf;
               setSetup(null);
               setCompleted(result);
@@ -549,12 +617,12 @@ function MfaGate({ me }: { me: Me }) {
         <p className="body-copy">
           {me.stage === "MFA_SETUP_REQUIRED"
             ? "Staff accounts require a second factor before any operational access. Use an authenticator app to continue."
-            : "Enter a current authenticator code or one unused recovery code. This sign-in challenge expires after five minutes."}
+            : "Open your authenticator app and use the current six-digit code for the account below, or enter an unused recovery code. Codes are not sent by email. This sign-in challenge expires after five minutes."}
         </p>
         <small className="auth-account">{me.user.email}</small>
         {error && <Notice error>{error}</Notice>}
         {me.stage === "MFA_SETUP_REQUIRED" ? (
-          <MfaEnrollment partial onComplete={done} />
+          <MfaEnrollment accountEmail={me.user.email} partial onComplete={done} />
         ) : (
           <Form
             invalidate={false}
@@ -567,12 +635,18 @@ function MfaGate({ me }: { me: Me }) {
             ]}
             submit="Verify & continue"
             onSubmit={async (d) => {
-              const r = await api("auth/mfa/verify", "POST", d);
+              const r = await api("auth/mfa/verify", "POST", {
+                code: d.code.replace(/\s/g, ""),
+              });
               csrf = r.csrf;
               await done();
             }}
           />
         )}
+        <p className="caption">
+          If a code is rejected, enable automatic date and time on your phone
+          and computer, and wait for the next code. Each code can be used once.
+        </p>
         <button
           className="text-button"
           onClick={async () => {
@@ -647,7 +721,7 @@ function AccountSecurity({ me }: { me: Me }) {
               </p>
             </>
           ) : (
-            <MfaEnrollment onComplete={refresh} />
+            <MfaEnrollment accountEmail={me.user.email} onComplete={refresh} />
           )}
         </Panel>
         <Panel

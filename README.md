@@ -50,6 +50,12 @@ npm.cmd run dev
 
 Bash/macOS/Linux: use the same commands with `npm` instead of `npm.cmd`. Setup generates random local-only values only if `.env` is absent, starts PostgreSQL, generates Prisma, applies committed migrations and seeds synthetic accounts once. Each role gets an independent random password; there is no universal demo or admin password. `node development.mjs accounts` deliberately displays passwords only on your own local terminal. Never paste its output in issues or commit `.local/`.
 
+### Local PostgreSQL without Docker
+
+If PostgreSQL is installed locally, use `npm.cmd run setup -- --local-db` for the initial setup instead. On Windows, setup detects PostgreSQL 18, 17 or 16 under Program Files; for another location, set `$env:PG_BIN` to its `bin` directory first. This creates a password-protected, project-specific cluster in the ignored `.local/postgres/` directory, listening on `127.0.0.1:5433`, and records its configuration in `.env`.
+
+After setup, `npm.cmd run dev` starts the local database when needed, the API on port 3000 and the frontend at **http://localhost:5173**. Retrieve the generated sign-in details with `node development.mjs accounts`. Stop the app with Ctrl+C and stop the database with `node development.mjs db:stop`; database records are retained. Repeating setup preserves the existing accounts and data.
+
 ### First staff sign-in and account security
 
 Use the individual initial password from the ignored local account file. Every staff role must then enroll a TOTP authenticator before any operational API can be accessed. Scan the enrollment QR in an authenticator app, enter its six-digit code and save the twelve one-use recovery codes. The enrollment secret and recovery codes are shown only during this controlled process. Keep them in secure personal storage, not this repository. Students can enroll optionally under **Account security**.

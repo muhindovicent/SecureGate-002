@@ -1324,6 +1324,31 @@ footer span:last-child {
   border-radius: 9px;
   margin-bottom: 17px;
 }
+.authenticator-qr svg {
+  display: block;
+  width: 256px;
+  max-width: 100%;
+  height: auto;
+  flex-shrink: 0;
+}
+.mfa-instructions {
+  padding-left: 22px;
+  margin: 0 0 20px;
+  font-size: 14px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.mfa-instructions li + li {
+  margin-top: 10px;
+}
+.mfa-key-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  font-size: 13px;
+}
 .setup-key {
   display: block;
   overflow-wrap: anywhere;
@@ -1332,6 +1357,7 @@ footer span:last-child {
   letter-spacing: 1px;
   margin: 0 0 20px;
   font-size: 12px;
+  user-select: all;
 }
 .recovery-sheet {
   padding-top: 20px;
