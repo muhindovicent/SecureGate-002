@@ -22,7 +22,7 @@ SecureGate/
     api/{backend.ts,tsconfig.json,package.json}
   prisma/
     schema.prisma
-    migrations/{202611010001_initial,202611010002_staff_mfa,202611010003_mfa_enrollment_expiry}/migration.sql
+    migrations/{202611010001_initial,202611010002_staff_mfa,202611010003_mfa_enrollment_expiry,202611010004_student_identity}/migration.sql
   tests/{security.test.ts,integration.ts,run-integration.mjs,browser.spec.ts}
   .github/workflows/ci.yml
   infrastructure.yml
@@ -59,6 +59,16 @@ After setup, `npm.cmd run dev` starts the local database when needed, the API on
 ### First staff sign-in and account security
 
 Use the individual initial password from the ignored local account file. Every staff role must then enroll a TOTP authenticator before any operational API can be accessed. Scan the enrollment QR in an authenticator app, enter its six-digit code and save the twelve one-use recovery codes. The enrollment secret and recovery codes are shown only during this controlled process. Keep them in secure personal storage, not this repository. Students can enroll optionally under **Account security**.
+
+### Student identity and personal QR
+
+The registrar creates each student with a unique **student ID number** (4–20 digits, stored as text to preserve leading zeros), the official university email, an independent password of at least 14 characters, and an explicit verification attestation. For example, `272200` can be paired with `mv272200@student.cavendish.ac.ug`. The alphabetic email prefix comes from the university record; it is not hardcoded to `mv`. The complete numeric suffix must match the student's ID and the domain must be exactly `student.cavendish.ac.ug`. Emails are normalized to lowercase and PostgreSQL enforces case-insensitive uniqueness. Student numbers are unique in `Student.registration`, linked to `User.email`, with the verifying registrar and verification timestamp recorded in PostgreSQL.
+
+Students sign in with either their verified number or official email plus their password. Passwords cannot contain the student ID and are stored only as salted scrypt hashes. Both login aliases share one account-level authentication quota. Unverified, inactive or suspended student accounts cannot use the student workspace; staff continue to use their existing roles and mandatory MFA. Verification is an attributable registrar check against university source records, not a claim of university SSO or email inbox ownership verification.
+
+Under **Student ID**, a signed-in student can select **Show my QR credential**. The owner-only endpoint derives the student from the session, never from a submitted student identifier. The QR remains an opaque random campus credential containing no student ID, email or password. Its recoverable value is encrypted with AES-256-GCM, a purpose-separated key, and associated data binding it to its credential and student; scanning still uses the keyed digest. Lists exclude both the raw value and ciphertext. The QR is not persisted in browser storage and clears from the screen after one minute or leaving the page. Gadgets and movement history are independently scoped to the student's authenticated identity on the API.
+
+Migration `202611010004_student_identity` preserves existing students, gadgets and movement history. Existing identities remain **unverified**: sign in as the registrar, choose **Manage ID**, verify the official student number/email pair, and issue a replacement credential. Re-verification revokes previous QR credentials and student sessions. Old digest-only QR values cannot be reconstructed; a registrar reissue enables personal QR display. Fresh development seeds generate a new synthetic student number and official-format email instead of a fixed ID. Retrieve those generated credentials with `node development.mjs accounts`.
 
 Later sign-ins require the password plus a current authenticator code or one unused recovery code. A used TOTP time step cannot be replayed, even in a concurrent request; wait for the next code when necessary. Recovery codes work once and trigger an account notification. Replacing them requires the current password and a valid second factor and invalidates all prior recovery codes.
 
@@ -97,7 +107,7 @@ The seeded student has no verified photograph. The placeholder is explicitly lab
 - [x] npm workspaces, React/TypeScript/Vite/Tailwind, NestJS, PostgreSQL, Prisma and committed migration.
 - [x] Individual local accounts, scrypt password hashes, server-side expiring sessions, HttpOnly/SameSite cookies, CSRF and login throttling.
 - [x] Eight fixed roles, backend authorization, own-record restrictions, checkpoint operator assignments.
-- [x] Registrar enrollment; 256-bit opaque QR issuance, keyed digest storage, revocation and lost-ID reporting.
+- [x] Registrar-verified unique student numbers and university emails; student ID/email login; 256-bit opaque QR issuance, encrypted owner display, keyed digest storage, revocation and lost-ID reporting.
 - [x] Gadget submission, independent physical approval/rejection, duplicate serial review, lost-gadget reporting and in-app decision notifications.
 - [x] Entry/exit engine, assisted and unconfirmed registration-only modes, transactional visits, unique active-visit constraint and idempotency.
 - [x] Camera/USB/manual browser scanner simulator; QR rendering for authorized issuance.
@@ -133,7 +143,7 @@ Times are generated on the server in UTC (`timestamptz`) and displayed in Africa
 
 | Role          | Read                                                                                            | Authorized writes                                                                        | Exclusions                                                    |
 | ------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| Student       | Own profile, IDs without secrets, gadgets, visits, movements, cases, notifications              | Gadget requests, lost-ID/gadget reports, correction cases                                | Other students, identity edits, gadget approval, role changes |
+| Student       | Own verified profile, personal QR, credential metadata, gadgets, visits, movements, cases, notifications | Gadget requests, lost-ID/gadget reports, correction cases                          | Other students, identity edits, gadget approval, role changes |
 | Officer       | Assigned checkpoint identity lookup, approved presented gadgets, checkpoint events, own reports | Assisted scan, incident, review request                                                  | Registry edits, device approval, override approval            |
 | Verifier      | Gadget verification queue and necessary owner identity                                          | Physical approval/rejection with findings                                                | Movement history, student enrollment, role assignment         |
 | Supervisor    | Aggregates, incidents, exception requests, assigned checkpoints                                 | Incident transitions, independent review decisions, custody, operator assignments        | Self-approval and arbitrary access bypass                     |
@@ -222,10 +232,12 @@ All routes use `/api/v1`. JSON request validation rejects unknown properties. Su
 | Methods / path                                     | Request / behavior                                                               | Roles                                            |
 | -------------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------ |
 | GET `health`                                       | Database-backed liveness; no personal data                                       | Public                                           |
-| POST `auth/login`                                  | `{email,password}` → cookie, user, CSRF                                          | Public, exact application origin                 |
+| POST `auth/login`                                  | `{identifier,password}` (student ID or email); legacy `{email,password}` also accepted | Public, exact application origin             |
 | POST `auth/logout`; GET `me`                       | Invalidate session; safe identity/CSRF                                           | Authenticated                                    |
-| GET/POST `students`                                | Search `q`; create `{name,email,registration,program,password}`                  | Registrar                                        |
+| GET/POST `students`                                | Search `q`; create `{name,email,registration,program,password,verified:true}`    | Registrar                                        |
+| PATCH `students/:id/identity`                      | Verify `{registration,email,verified:true,reason}`; revoke existing sessions/QR | Registrar                                        |
 | GET/POST `credentials`                             | Metadata by `studentId`; issue `{studentId}` with one-time QR output             | Student own metadata; registrar issuance         |
+| GET `credentials/qr`                              | Reveal active personal QR; no caller-supplied target; audited and not cached      | Student owner only                               |
 | POST `credentials/:id/revoke`; `credentials/lost`  | Immediate status revocation / own lost-ID report                                 | Registrar / student                              |
 | GET/POST `gadgets`                                 | List own/queue; submit `{category,manufacturer,model,serial}`                    | Student / verifier queue                         |
 | POST `gadgets/:id/verify`                          | `{approved,physicalCheck:true,reason}`                                           | Verifier                                         |
@@ -249,7 +261,7 @@ Swagger enumerates routes, but complete per-field generated DTO schemas are outs
 
 ### Authentication endpoints
 
-- `POST auth/login {email,password}` returns `stage`, CSRF, safe user identity and a cookie. A student without MFA gets `FULL`; other accounts get `MFA_REQUIRED` or staff-first-login `MFA_SETUP_REQUIRED`. Partial sessions expire in five minutes and cannot access ordinary API resources.
+- `POST auth/login {identifier,password}` accepts a verified student ID number or institutional email and returns `stage`, CSRF, safe user identity and a cookie. `{email,password}` remains supported. A verified active student without MFA gets `FULL`; other accounts get `MFA_REQUIRED` or staff-first-login `MFA_SETUP_REQUIRED`. Partial sessions expire in five minutes and cannot access ordinary API resources.
 - `POST auth/mfa/setup {currentPassword?}` starts a five-minute enrollment. Pending first-time staff authentication already verifies the password; optional enrollment from a full session requires it again. An enrolled authenticator cannot be replaced through this endpoint.
 - `POST auth/mfa/confirm {code}` validates enrollment, rotates the session and returns recovery codes once.
 - `POST auth/mfa/verify {code}` consumes a TOTP code or a one-use recovery code and rotates the partial cookie to a full authenticated session.
@@ -263,7 +275,7 @@ Swagger enumerates routes, but complete per-field generated DTO schemas are outs
 - Session tokens are 256-bit random values, stored only as SHA-256 digests server-side. Cookies are HttpOnly, SameSite=Strict, eight-hour full-session expiry; partial MFA sessions expire in five minutes. Secure is required in eventual production. CSRF requires both an unpredictable session token and exact `APP_ORIGIN` for writes.
 - Login and MFA attempts use atomic PostgreSQL-backed quotas that survive restarts and work across API instances. Password failures are limited per account and total sign-in requests per source; MFA and sensitive reauthentication attempts are limited per user. The current thresholds require institutional tuning for campus NAT/load patterns.
 - TOTP uses the maintained OTPAuth implementation (RFC 6238 SHA-1, six digits, 30-second periods, ±1 period tolerance). A locked user row and last-consumed counter reject replay. Authenticator secrets use AES-256-GCM with random nonces and a purpose-separated key derived from `CREDENTIAL_KEY`; twelve independently random 80-bit recovery codes are stored only as purpose-prefixed digests and consumed transactionally. Neither secrets nor codes are exposed in ordinary profile/list responses.
-- QR credentials contain only `sg1.` and 256 random bits, represented by keyed HMAC SHA-256 in the database. The key must be backed up separately; losing it makes existing IDs unverifiable and enrolled authenticator secrets unreadable. Purpose separation prevents reusing the QR HMAC directly as an MFA encryption key; versioned key rotation remains production work. Reusable printed codes can be cloned. Officer checks, anti-passback, rapid-entry review and revocation mitigate rather than eliminate that risk.
+- QR credentials contain only `sg1.` and 256 random bits. PostgreSQL stores a keyed HMAC SHA-256 for scanning and a separately purpose-keyed AES-256-GCM encrypted value for audited owner display. The key must be backed up separately; losing it makes existing IDs unverifiable and encrypted credentials/authenticator secrets unreadable. Versioned key rotation remains production work. Reusable printed codes can be cloned. Officer checks, anti-passback, rapid-entry review and revocation mitigate rather than eliminate that risk.
 - Every credential scan checks server authorization and active enrollment/status. Credential issuance, gadget decisions, incident transitions, staff provisioning, history reads and scans are audited without raw secrets.
 - React escapes text. No arbitrary HTML rendering, public image uploads, private browser storage or permissive cross-origin API is used. Helmet applies browser security headers; final production CSP/HTTPS is pending deployment design.
 - Incident/review approval never creates a backdoor “allow access” operation. Emergency egress follows approved life-safety procedures regardless of application decisions.

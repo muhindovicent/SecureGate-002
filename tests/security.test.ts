@@ -10,6 +10,9 @@ import {
   totpStep,
   sealMfaSecret,
   openMfaSecret,
+  studentEmailMatches,
+  sealQrCredential,
+  openQrCredential,
 } from "../apps/api/backend";
 test("individual password hashes are salted and reject wrong passwords", () => {
   const a = hashPassword("a strong individual passphrase");
@@ -17,6 +20,21 @@ test("individual password hashes are salted and reject wrong passwords", () => {
   assert.notEqual(a, b);
   assert.equal(verifyPassword("a strong individual passphrase", a), true);
   assert.equal(verifyPassword("wrong", a), false);
+});
+test("university email mapping preserves each complete student number and rejects lookalike domains", () => {
+  assert.equal(studentEmailMatches("272200", "mv272200@student.cavendish.ac.ug"), true);
+  assert.equal(studentEmailMatches("000272200", "ab000272200@student.cavendish.ac.ug"), true);
+  assert.equal(studentEmailMatches("272200", "mv1272200@student.cavendish.ac.ug"), false);
+  assert.equal(studentEmailMatches("272200", "mv272200@student.cavendish.ac.ug.evil"), false);
+  assert.equal(studentEmailMatches("272200", "mv272201@student.cavendish.ac.ug"), false);
+});
+test("QR encryption is randomized and bound to the credential and student", () => {
+  const raw = "sg1." + "x".repeat(43);
+  const encrypted = sealQrCredential(raw, "credential-a", "student-a");
+  assert.notEqual(encrypted, sealQrCredential(raw, "credential-a", "student-a"));
+  assert.equal(openQrCredential(encrypted, "credential-a", "student-a"), raw);
+  assert.throws(() => openQrCredential(encrypted, "credential-a", "student-b"));
+  assert.throws(() => openQrCredential(encrypted, "credential-b", "student-a"));
 });
 test("entry does not toggle presence and missing exits require review", () => {
   assert.equal(transition(false, "ENTRY"), "APPROVED");

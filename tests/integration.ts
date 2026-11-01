@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomInt, randomUUID } from "node:crypto";
 import {
   db,
   start,
@@ -47,21 +47,23 @@ test("isolated PostgreSQL access-control and campus workflow", async (t) => {
   }
   try {
     for (const role of [
+      "REGISTRAR",
       "STUDENT",
       "OFFICER",
       "VERIFIER",
       "SUPERVISOR",
-      "REGISTRAR",
       "ADMIN",
       "MANAGEMENT",
       "AUDITOR",
       "OTHER",
     ]) {
       const password = randomBytes(18).toString("hex");
+      const number = String(randomInt(100000, 1000000000));
+      const isStudent = ["STUDENT", "OTHER"].includes(role);
       const u = await db.user.create({
         data: {
           name: "Test " + role,
-          email: role.toLowerCase() + "@test.invalid",
+          email: isStudent ? `tt${number}@student.cavendish.ac.ug` : role.toLowerCase() + "@test.invalid",
           passwordHash: hashPassword(password),
           role: role === "OTHER" ? "STUDENT" : (role as any),
         },
@@ -70,8 +72,10 @@ test("isolated PostgreSQL access-control and campus workflow", async (t) => {
         await db.student.create({
           data: {
             userId: u.id,
-            registration: "TEST-" + role,
+            registration: number,
             program: "Test program",
+            identityVerifiedAt: new Date(),
+            identityVerifiedBy: accounts.REGISTRAR.user.id,
           },
         });
       const r = await fetch(url + "auth/login", {
@@ -83,6 +87,8 @@ test("isolated PostgreSQL access-control and campus workflow", async (t) => {
       const data = await r.json();
       accounts[role] = {
         ...data,
+        password,
+        number,
         cookie: r.headers.get("set-cookie")!.split(";")[0],
       };
       if (data.stage === "MFA_SETUP_REQUIRED") {
@@ -398,15 +404,17 @@ test("isolated PostgreSQL access-control and campus workflow", async (t) => {
           "students",
           "POST",
           {
-            email: "new@test.invalid",
+            email: "nv272200@student.cavendish.ac.ug",
             name: "New Student",
-            registration: "NEW-001",
+            registration: "272200",
             program: "Computing",
             password: randomBytes(18).toString("hex"),
+            verified: true,
           },
           201,
         );
         assert.ok(s.id);
+        assert.equal(s.identityVerifiedBy, accounts.REGISTRAR.user.id);
         const c = await req(
           "REGISTRAR",
           "credentials",
@@ -421,6 +429,79 @@ test("isolated PostgreSQL access-control and campus workflow", async (t) => {
         assert.equal(JSON.stringify(list).includes(credential), false);
       },
     );
+    await t.test("student numbers and official emails are verified, unique, and independent of passwords", async () => {
+      const number = String(randomInt(100000, 1000000000));
+      const data = { name: "Dynamic Student", registration: number, email: `ab${number}@student.cavendish.ac.ug`, program: "Computing", password: randomBytes(18).toString("hex"), verified: true };
+      await req("STUDENT", "students", "POST", data, 403);
+      await req("ADMIN", "students", "POST", data, 403);
+      await req("REGISTRAR", "students", "POST", { ...data, verified: false }, 400);
+      await req("REGISTRAR", "students", "POST", { ...data, email: `ab${number}1@student.cavendish.ac.ug` }, 400);
+      await req("REGISTRAR", "students", "POST", { ...data, email: `ab${number}@student.cavendish.ac.ug.evil` }, 400);
+      await req("REGISTRAR", "students", "POST", { ...data, password: "Predictable-" + number }, 400);
+      const created = await req("REGISTRAR", "students", "POST", { ...data, email: data.email.toUpperCase() }, 201);
+      await req("REGISTRAR", "students", "POST", data, 409);
+      const stored = await db.user.findUniqueOrThrow({ where: { email: data.email } });
+      assert.notEqual(stored.passwordHash, data.password);
+      for (const identifier of [number, data.email.toUpperCase()]) {
+        const response = await fetch(url + "auth/login", { method: "POST", headers: { origin, "Content-Type": "application/json" }, body: JSON.stringify({ identifier, password: data.password }) });
+        assert.equal(response.status, 201);
+        const session = await response.json();
+        assert.equal(session.user.id, stored.id);
+        assert.equal(session.user.role, "STUDENT");
+      }
+      await req(undefined, "auth/login", "POST", { identifier: number, password: number }, 401);
+      await req("STUDENT", `students/${created.id}/identity`, "PATCH", { ...data, reason: "Trying to edit another identity" }, 403);
+      await assert.rejects(db.user.create({ data: { email: data.email.toUpperCase(), name: "Duplicate", role: "STUDENT", passwordHash: hashPassword(data.password) } }));
+      await assert.rejects(db.user.update({ where: { id: stored.id }, data: { email: "outsider@example.invalid" } }));
+      // Both login aliases share one PostgreSQL-backed failure quota.
+      for (let i = 0; i < 4; i++) await req(undefined, "auth/login", "POST", { identifier: i % 2 ? number : data.email, password: "incorrect" }, 401);
+      await req(undefined, "auth/login", "POST", { identifier: data.email, password: "incorrect" }, 429);
+    });
+    await t.test("legacy identities require registrar verification and do not gain verified status during migration", async () => {
+      const password = randomBytes(18).toString("hex");
+      const user = await db.user.create({ data: { email: "legacy@test.invalid", name: "Legacy student", role: "STUDENT", passwordHash: hashPassword(password) } });
+      const legacy = await db.student.create({ data: { userId: user.id, registration: "LEGACY-001", program: "Computing" } });
+      await req(undefined, "auth/login", "POST", { email: user.email, password }, 401);
+      await req("REGISTRAR", "credentials", "POST", { studentId: legacy.id }, 409);
+      const registration = "000" + String(randomInt(100000, 1000000000));
+      const email = `ls${registration}@student.cavendish.ac.ug`;
+      const verified = await req("REGISTRAR", `students/${legacy.id}/identity`, "PATCH", { registration, email, verified: true, reason: "Verified source record" });
+      assert.equal(verified.registration, registration);
+      assert.ok(verified.identityVerifiedAt);
+      assert.equal(verified.identityVerifiedBy, accounts.REGISTRAR.user.id);
+      const response = await fetch(url + "auth/login", {
+        method: "POST", headers: { origin, "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier: registration, password }),
+      });
+      assert.equal(response.status, 201);
+      accounts.LEGACY = { ...(await response.json()), cookie: response.headers.get("set-cookie")!.split(";")[0] };
+      const issued = await req("REGISTRAR", "credentials", "POST", { studentId: legacy.id }, 201);
+      const gadget = await req("LEGACY", "gadgets", "POST", { category: "Laptop", manufacturer: "Test", model: "Preserved", serial: randomUUID() }, 201);
+      await req("REGISTRAR", `students/${legacy.id}/identity`, "PATCH", { registration, email, verified: true, reason: "Reconfirmed source identity" });
+      await req("LEGACY", "me", "GET", undefined, 401);
+      assert.equal((await db.credential.findUniqueOrThrow({ where: { id: issued.id } })).status, "REVOKED");
+      assert.equal((await db.gadget.findUniqueOrThrow({ where: { id: gadget.id } })).studentId, legacy.id);
+      await req(undefined, "auth/login", "POST", { email: user.email, password }, 401);
+      await db.student.update({ where: { id: legacy.id }, data: { enrollment: "SUSPENDED" } });
+      await req(undefined, "auth/login", "POST", { identifier: registration, password }, 401);
+    });
+    await t.test("only the student owner can display their active QR and encrypted values never enter lists", async () => {
+      const current = await req("STUDENT", "credentials/qr");
+      assert.equal(current.credential, credential);
+      const stored = await db.credential.findUniqueOrThrow({ where: { id: current.id } });
+      assert.ok(stored.encryptedValue);
+      assert.equal(stored.encryptedValue!.includes(credential), false);
+      const other = await db.student.findUniqueOrThrow({ where: { userId: accounts.OTHER.user.id } });
+      const issued = await req("REGISTRAR", "credentials", "POST", { studentId: other.id }, 201);
+      const own = await req("OTHER", "credentials/qr?studentId=" + student.id);
+      assert.equal(own.credential, issued.credential);
+      assert.notEqual(own.credential, credential);
+      for (const role of ["ADMIN", "REGISTRAR", "OFFICER", "SUPERVISOR", "VERIFIER", "MANAGEMENT", "AUDITOR"])
+        await req(role, "credentials/qr", "GET", undefined, 403);
+      await db.credential.update({ where: { id: issued.id }, data: { encryptedValue: null } });
+      await req("OTHER", "credentials/qr", "GET", undefined, 409);
+      assert.equal(JSON.stringify(await req("STUDENT", "credentials")).includes("encryptedValue"), false);
+    });
     await t.test(
       "cross-user and role escalation requests are rejected",
       async () => {
@@ -429,7 +510,9 @@ test("isolated PostgreSQL access-control and campus workflow", async (t) => {
         await req("REGISTRAR", "incidents", "GET", undefined, 403);
         await req("MANAGEMENT", "audit-events", "GET", undefined, 403);
         const other = await req("OTHER", "credentials?studentId=" + student.id);
-        assert.deepEqual(other, []);
+        const ownerCredentials = await req("STUDENT", "credentials");
+        assert.ok(other.every((c: any) => !ownerCredentials.some((own: any) => own.id === c.id)));
+        assert.equal(JSON.stringify(other).includes(credential), false);
         await req(
           "STUDENT",
           "gadgets",
@@ -835,6 +918,22 @@ test("isolated PostgreSQL access-control and campus workflow", async (t) => {
         assert.equal(await db.incident.count(), before);
       },
     );
+    await t.test("student sessions cannot read or alter another student's gadgets or movements", async () => {
+      const other = await req("OTHER", "gadgets?studentId=" + student.id);
+      assert.equal(other.some((g: any) => g.id === gadget.id), false);
+      const otherStudent = await db.student.findUniqueOrThrow({ where: { userId: accounts.OTHER.user.id } });
+      const otherMovements = await req("OTHER", "movements?studentId=" + student.id);
+      const otherVisits = await req("OTHER", "visits?studentId=" + student.id);
+      assert.ok(otherMovements.length > 0);
+      assert.ok(otherMovements.every((m: any) => m.studentId === otherStudent.id));
+      assert.ok(otherVisits.every((v: any) => v.studentId === otherStudent.id));
+      await req("OTHER", `gadgets/${gadget.id}/lost`, "POST", {}, 404);
+      const own = await req("STUDENT", "movements?studentId=someone-else");
+      assert.ok(own.length > 0);
+      assert.ok(own.every((m: any) => m.studentId === student.id));
+      await req("STUDENT", "credentials/qr", "GET", undefined, 404);
+      await req("STUDENT", "auth/password", "POST", { currentPassword: accounts.STUDENT.password, newPassword: "Password-" + student.registration }, 400);
+    });
     await t.test("login throttles repeated failures", async () => {
       for (let i = 0; i < 5; i++)
         await req(

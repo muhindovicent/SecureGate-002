@@ -27,9 +27,12 @@ import {
   User,
   Session,
   AuthStage,
+  Student,
 } from "@prisma/client";
 import {
   randomBytes,
+  randomInt,
+  randomUUID,
   createHash,
   createHmac,
   scryptSync,
@@ -55,6 +58,28 @@ const production = process.env.NODE_ENV === "production";
 const origin = process.env.APP_ORIGIN || "http://localhost:5173";
 const uuid = z.string().uuid();
 const text = z.string().trim().min(2).max(500);
+const studentNumber = z.string().trim().regex(/^\d{4,20}$/, "Use a 4–20 digit student ID number");
+const universityEmail = z.string().trim().toLowerCase().pipe(z.email().max(254));
+export function studentEmailMatches(number: string, email: string) {
+  const match = /^([a-z][a-z._-]*)(\d{4,20})@student\.cavendish\.ac\.ug$/.exec(email);
+  return !!match && match[2] === number;
+}
+function verifiedStudent(student: Student | null | undefined, email: string) {
+  return !!student?.identityVerifiedAt && !!student.identityVerifiedBy &&
+    studentEmailMatches(student.registration, email) && student.enrollment === "ACTIVE";
+}
+function independentStudentPassword(password: string, number: string) {
+  if (password.includes(number))
+    fail(400, "The password must not contain the student ID number");
+}
+const studentIdentity = z.object({
+  registration: studentNumber,
+  email: universityEmail,
+  verified: z.literal(true),
+}).refine((d) => studentEmailMatches(d.registration, d.email), {
+  path: ["email"],
+  message: "Use the student's official prefix followed by their exact ID at student.cavendish.ac.ug",
+});
 const roles = z.enum([
   "STUDENT",
   "OFFICER",
@@ -135,10 +160,12 @@ async function actor(
   if (typeof token !== "string") fail(401, "Please sign in");
   const session = await db.session.findUnique({
     where: { id: digest(token) },
-    include: { user: true },
+    include: { user: { include: { student: true } } },
   });
   if (!session || session.expiresAt < new Date() || !session.user.active)
     fail(401, "Session expired");
+  if (session!.user.role === "STUDENT" && !verifiedStudent(session!.user.student, session!.user.email))
+    fail(403, "Your student identity must be verified by the registrar before signing in");
   if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) {
     if (
       req.headers.origin !== origin ||
@@ -222,6 +249,26 @@ export function openMfaSecret(encrypted: string) {
   return Buffer.concat([decipher.update(value), decipher.final()]).toString(
     "utf8",
   );
+}
+function qrEncryptionKey() {
+  if (!key || key.length < 64) throw new Error("CREDENTIAL_KEY is required");
+  return createHmac("sha256", key).update("SecureGate/QR/encryption/v1").digest();
+}
+export function sealQrCredential(raw: string, id: string, owner: string) {
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", qrEncryptionKey(), nonce);
+  cipher.setAAD(Buffer.from(`SecureGate/QR/v1/${id}/${owner}`));
+  const encrypted = Buffer.concat([cipher.update(raw, "utf8"), cipher.final()]);
+  return [nonce, cipher.getAuthTag(), encrypted].map((b) => b.toString("base64url")).join(".");
+}
+export function openQrCredential(encrypted: string, id: string, owner: string) {
+  const parts = encrypted.split(".");
+  if (parts.length !== 3) throw new Error("Invalid encrypted QR credential");
+  const [nonce, tag, value] = parts.map((p) => Buffer.from(p, "base64url"));
+  const decipher = createDecipheriv("aes-256-gcm", qrEncryptionKey(), nonce);
+  decipher.setAAD(Buffer.from(`SecureGate/QR/v1/${id}/${owner}`));
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(value), decipher.final()]).toString("utf8");
 }
 export function authenticator(
   secret: string,
@@ -450,26 +497,25 @@ class Api {
     @Body() body: unknown,
   ) {
     if (req.headers.origin !== origin) fail(403, "Invalid request origin");
-    const data = z
-      .object({
-        email: z
-          .email()
-          .max(254)
-          .transform((s) => s.toLowerCase()),
-        password: z.string().min(1).max(200),
-      })
-      .strict()
-      .parse(body);
+    const password = z.string().min(1).max(200);
+    const data = z.union([
+      z.object({ identifier: z.string().trim().min(1).max(254).toLowerCase(), password }).strict(),
+      z.object({ email: universityEmail, password }).strict(),
+    ]).parse(body);
+    const identifier = "identifier" in data ? data.identifier : data.email;
     await authQuota("source/" + String(req.ip), 300);
-    const bucketKey = await authQuota("password/" + data.email);
-    const user = await db.user.findUnique({ where: { email: data.email } });
+    const user = /^\d{4,20}$/.test(identifier)
+      ? (await db.student.findUnique({ where: { registration: identifier }, include: { user: { include: { student: true } } } }))?.user
+      : await db.user.findFirst({ where: { email: { equals: identifier, mode: "insensitive" } }, include: { student: true } });
+    const bucketKey = await authQuota("password/" + (user?.id || identifier));
     const valid = await passwordMatches(
       data.password,
       user?.passwordHash || fakeHash,
     );
-    if (!user || !user.active || !valid) {
+    if (!user || !user.active || !valid ||
+      (user.role === "STUDENT" && (!verifiedStudent(user.student, user.email) || data.password.includes(user.student!.registration)))) {
       await audit(db, null, "LOGIN_FAILED");
-      fail(401, "Invalid credentials");
+      fail(401, "Invalid credentials or student identity awaiting registrar verification");
     }
     await resetQuota(bucketKey);
     const stage: AuthStage = user!.mfaSecretEncrypted
@@ -653,6 +699,8 @@ class Api {
       .parse(body);
     if (d.newPassword === d.currentPassword)
       fail(400, "Choose a different password");
+    if (c.user.role === "STUDENT")
+      independentStudentPassword(d.newPassword, (await ownStudent(c.user)).registration);
     const quota = await authQuota("reauth/" + c.user.id);
     const passwordHash = await newPasswordHash(d.newPassword);
     const result = await transaction(async (tx) => {
@@ -749,6 +797,7 @@ class Api {
           {
             user: { name: { contains: q.slice(0, 100), mode: "insensitive" } },
           },
+          { user: { email: { contains: q.slice(0, 100), mode: "insensitive" } } },
         ],
       },
       include: { user: { select: { name: true, email: true } } },
@@ -761,22 +810,21 @@ class Api {
     @Body() body: unknown,
   ) {
     const { user } = await actor(req, ["REGISTRAR"]);
-    const d = z
-      .object({
-        email: z.email(),
+    const d = studentIdentity.safeExtend({
         name: text,
-        registration: text,
         program: text,
         password: z.string().min(14).max(128),
       })
       .strict()
       .parse(body);
+    independentStudentPassword(d.password, d.registration);
+    const passwordHash = await newPasswordHash(d.password);
     return transaction(async (tx) => {
       const u = await tx.user.create({
         data: {
           email: d.email.toLowerCase(),
           name: d.name,
-          passwordHash: hashPassword(d.password),
+          passwordHash,
           role: "STUDENT",
         },
       });
@@ -785,10 +833,32 @@ class Api {
           userId: u.id,
           registration: d.registration,
           program: d.program,
+          identityVerifiedAt: new Date(),
+          identityVerifiedBy: user.id,
         },
       });
       await audit(tx, user.id, "STUDENT_CREATED", s.id);
       return s;
+    });
+  }
+  @Patch("students/:id/identity") async verifyStudentIdentity(
+    @Req() req: Request, @Param("id") id: string, @Body() body: unknown,
+  ) {
+    const { user } = await actor(req, ["REGISTRAR"]);
+    const d = studentIdentity.safeExtend({ reason: text }).strict().parse(body);
+    return transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Student" WHERE id=${uuid.parse(id)}::uuid FOR UPDATE`;
+      const student = await tx.student.findUniqueOrThrow({ where: { id } });
+      // Clear the old attestation in this transaction before changing its linked email.
+      await tx.student.update({ where: { id }, data: { identityVerifiedAt: null, identityVerifiedBy: null } });
+      await tx.user.update({ where: { id: student.userId }, data: { email: d.email } });
+      const updated = await tx.student.update({ where: { id }, data: {
+        registration: d.registration, identityVerifiedAt: new Date(), identityVerifiedBy: user.id,
+      } });
+      await tx.session.deleteMany({ where: { userId: student.userId } });
+      await tx.credential.updateMany({ where: { studentId: id, status: "ACTIVE" }, data: { status: "REVOKED", revokedAt: new Date() } });
+      await audit(tx, user.id, "STUDENT_IDENTITY_VERIFIED", id, { reason: d.reason });
+      return updated;
     });
   }
   @Get("credentials") async credentials(
@@ -818,8 +888,8 @@ class Api {
     const raw = "sg1." + randomBytes(32).toString("base64url");
     const credential = await transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Student" WHERE id=${d.studentId}::uuid FOR UPDATE`;
-      const s = await tx.student.findUnique({ where: { id: d.studentId } });
-      if (!s || s.enrollment !== "ACTIVE")
+      const s = await tx.student.findUnique({ where: { id: d.studentId }, include: { user: true } });
+      if (!s || !verifiedStudent(s, s.user.email))
         fail(409, "Active verified enrollment required");
       await tx.credential.updateMany({
         where: { studentId: d.studentId, status: "ACTIVE" },
@@ -827,11 +897,15 @@ class Api {
       });
       const c = await tx.credential.create({
         data: {
+          id: randomUUID(),
           studentId: d.studentId,
           digest: credentialDigest(raw),
           expiresAt: new Date(Date.now() + 365 * 86400000),
         },
       });
+      await tx.credential.update({ where: { id: c.id }, data: {
+        encryptedValue: sealQrCredential(raw, c.id, s!.id),
+      } });
       await audit(tx, user.id, "CREDENTIAL_ISSUED", c.id);
       return c;
     });
@@ -841,6 +915,19 @@ class Api {
       notice:
         "One-time issuance output. Deliver only through the authorized ID-printing workflow; do not retain in logs.",
     };
+  }
+  @Get("credentials/qr") async personalQr(@Req() req: Request) {
+    const { user } = await actor(req, ["STUDENT"]);
+    const student = await ownStudent(user);
+    const current = await db.credential.findFirst({ where: {
+      studentId: student.id, status: "ACTIVE", expiresAt: { gt: new Date() },
+    } });
+    if (!current) fail(404, "No active credential. Ask the registrar to issue your student ID.");
+    if (!current!.encryptedValue) fail(409, "Ask the registrar to reissue this legacy ID before displaying its QR.");
+    const raw = openQrCredential(current!.encryptedValue!, current!.id, student.id);
+    if (credentialDigest(raw) !== current!.digest) throw new Error("Credential integrity check failed");
+    await audit(db, user.id, "PERSONAL_QR_VIEWED", current!.id);
+    return { id: current!.id, credential: raw, expiresAt: current!.expiresAt };
   }
   @Post("credentials/lost") async lost(@Req() req: Request) {
     const { user } = await actor(req, ["STUDENT"]);
@@ -1077,14 +1164,15 @@ class Api {
     const c = await tx.credential.findUnique({
       where: { digest: credentialDigest(raw) },
       include: {
-        student: { include: { user: { select: { name: true, email: true } } } },
+        student: { include: { user: { select: { name: true, email: true, active: true } } } },
       },
     });
     if (
       !c ||
       c.status !== "ACTIVE" ||
       c.expiresAt < new Date() ||
-      c.student.enrollment !== "ACTIVE"
+      !c.student.user.active ||
+      !verifiedStudent(c.student, c.student.user.email)
     )
       fail(403, "Invalid, expired or revoked credential");
     return c;
@@ -1709,10 +1797,11 @@ async function seed() {
     throw new Error(
       "Database contains users; refusing to seed over existing data.",
     );
-  const accounts: Array<{ role: string; email: string; password: string }> = [];
+  const accounts: Array<{ role: string; email: string; password: string; studentNumber?: string }> = [];
+  const demoNumber = String(randomInt(100000, 1000000000));
   await transaction(async (tx) => {
     for (const role of roles.options) {
-      const email = role.toLowerCase() + "@demo.securegate.test",
+      const email = role === "STUDENT" ? `sg${demoNumber}@student.cavendish.ac.ug` : role.toLowerCase() + "@demo.securegate.test",
         password = randomBytes(18).toString("base64url");
       const u = await tx.user.create({
         data: {
@@ -1725,16 +1814,14 @@ async function seed() {
           role,
         },
       });
-      accounts.push({ role, email, password });
-      if (role === "STUDENT")
-        await tx.student.create({
-          data: {
-            userId: u.id,
-            registration: "DEMO-2026-001",
-            program: "BSc Computer Science",
-          },
-        });
+      accounts.push({ role, email, password, ...(role === "STUDENT" ? { studentNumber: demoNumber } : {}) });
     }
+    const registrar = await tx.user.findUniqueOrThrow({ where: { email: "registrar@demo.securegate.test" } });
+    const studentUser = await tx.user.findUniqueOrThrow({ where: { email: `sg${demoNumber}@student.cavendish.ac.ug` } });
+    await tx.student.create({ data: {
+      userId: studentUser.id, registration: demoNumber, program: "BSc Computer Science",
+      identityVerifiedAt: new Date(), identityVerifiedBy: registrar.id,
+    } });
     const officer = await tx.user.findUniqueOrThrow({
       where: { email: "officer@demo.securegate.test" },
     });

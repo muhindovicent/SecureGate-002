@@ -2,6 +2,7 @@ import { dirname, resolve } from "node:path";
 import { test, expect, Page } from "@playwright/test";
 import { readFileSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
 import * as OTPAuth from "otpauth";
+import { randomInt, randomBytes } from "node:crypto";
 const accounts = JSON.parse(
   readFileSync(process.env.LOCAL_ACCOUNTS_PATH!, "utf8"),
 );
@@ -23,7 +24,7 @@ function nextRecoveryCode(role: string) {
 async function login(page: Page, role: string) {
   const account = accounts.find((a: any) => a.role === role);
   await page.goto("/login");
-  await page.getByLabel("Email address").fill(account.email);
+  await page.getByLabel("Student ID or university email").fill(account.email);
   await page.getByLabel("Password", { exact: true }).fill(account.password);
   await page.getByRole("button", { name: "Sign in securely" }).click();
   await expect
@@ -93,6 +94,13 @@ test("student, registrar, verifier and officer complete a real gadget visit", as
   expect(credential).toMatch(/^sg1\./);
   await logout(page);
   await login(page, "STUDENT");
+  await page.getByRole("link", { name: "Student ID", exact: true }).click();
+  const personalQrResponse = page.waitForResponse((r) => r.url().endsWith("/credentials/qr"));
+  await page.getByRole("button", { name: "Show my QR credential" }).click();
+  expect((await (await personalQrResponse).json()).credential).toBe(credential);
+  await expect(page.getByRole("img", { name: "Your personal campus QR credential" })).toBeVisible();
+  await page.getByRole("button", { name: "Hide my QR" }).click();
+  await expect(page.getByRole("img", { name: "Your personal campus QR credential" })).toHaveCount(0);
   await page.getByRole("link", { name: "My gadgets", exact: true }).click();
   const serial = "BROWSER-" + Date.now();
   await page.getByLabel("Category", { exact: true }).selectOption("Laptop");
@@ -300,4 +308,41 @@ test("student enrolls MFA, saves recovery codes and changes their password", asy
   await expect(
     page.getByRole("heading", { name: "Overview", exact: true }),
   ).toBeVisible();
+});
+
+test("registrar enrolls a new unique identity and the student signs in by ID to their own workspace", async ({ page }) => {
+  const number = String(randomInt(100000, 1000000000));
+  const email = `bs${number}@student.cavendish.ac.ug`;
+  const password = randomBytes(24).toString("base64url");
+  await login(page, "REGISTRAR");
+  await page.getByLabel("Verified full name").fill("New browser student");
+  await page.getByLabel("University email", { exact: true }).fill(email);
+  await page.getByLabel("Student ID number", { exact: true }).fill(number);
+  await page.getByLabel("Academic program").fill("Computing");
+  await page.getByLabel("Initial individual password (14+ characters)").fill(password);
+  await page.getByLabel("I verified the student ID and official email against university records.").check();
+  await page.getByRole("button", { name: "Create student record" }).click();
+  const row = page.getByRole("row").filter({ hasText: email });
+  await expect(row).toContainText(number);
+  await row.getByRole("button", { name: "Manage ID" }).click();
+  await page.getByLabel("I verified this student’s identity through the approved process.").check();
+  await page.getByRole("button", { name: "Issue replacement credential" }).click();
+  await expect(page.getByLabel("Issued opaque QR credential")).toBeVisible();
+  await logout(page);
+  await page.getByLabel("Student ID or university email").fill(number);
+  await page.getByLabel("Password", { exact: true }).fill(password);
+  await page.getByRole("button", { name: "Sign in securely" }).click();
+  await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
+  await page.getByRole("link", { name: "My profile", exact: true }).click();
+  await expect(page.locator(".profile-fields")).toContainText(email);
+  await expect(page.locator(".profile-fields")).toContainText(number);
+  await page.getByRole("link", { name: "My gadgets", exact: true }).click();
+  await expect(page.locator(".gadget-row")).toHaveCount(0);
+  await page.getByRole("link", { name: "Movement history", exact: true }).click();
+  await expect(page.getByRole("table")).toHaveCount(0);
+  await page.getByRole("link", { name: "Student ID", exact: true }).click();
+  await page.getByRole("button", { name: "Show my QR credential" }).click();
+  await expect(page.getByRole("img", { name: "Your personal campus QR credential" })).toBeVisible();
+  await page.goto("/admin/users");
+  await expect(page.getByRole("heading", { name: "Access restricted" })).toBeVisible();
 });

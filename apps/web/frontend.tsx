@@ -393,8 +393,8 @@ function Login() {
           <p>Sign in with your individual university account.</p>
           <Form
             fields={[
-              { name: "email", label: "Email address", type: "email" },
-              { name: "password", label: "Password", type: "password" },
+              { name: "identifier", label: "Student ID or university email", autoComplete: "username" },
+              { name: "password", label: "Password", type: "password", autoComplete: "current-password" },
             ]}
             submit="Sign in securely"
             onSubmit={async (d) => {
@@ -406,6 +406,11 @@ function Login() {
               );
             }}
           />
+          <p className="body-copy">
+            Students use their registrar-verified ID number or official university
+            email and an individual password. Your student ID is not your password.
+            Staff use their institutional email.
+          </p>
           <div className="demo-note">
             <ShieldCheck size={18} />
             <span>
@@ -1530,6 +1535,39 @@ function Scanner() {
     </>
   );
 }
+function PersonalStudentQr() {
+  const [qr, setQr] = useState<{ credential: string; expiresAt: string } | null>(null),
+    [error, setError] = useState(""),
+    [loading, setLoading] = useState(false);
+  useEffect(() => {
+    if (!qr) return;
+    const timer = window.setTimeout(() => setQr(null), 60000);
+    return () => window.clearTimeout(timer);
+  }, [qr]);
+  return (
+    <div className="personal-qr">
+      <p className="body-copy">Only your signed-in account can reveal this credential. The display clears after one minute.</p>
+      {error && <Notice error>{error}</Notice>}
+      {qr ? (
+        <>
+          <div className="authenticator-qr">
+            <QRCodeSVG value={qr.credential} size={256} marginSize={4} role="img" aria-label="Your personal campus QR credential" />
+          </div>
+          <p className="caption">Campus credential · expires {date(qr.expiresAt)}</p>
+          <button type="button" className="secondary" onClick={() => setQr(null)}>Hide my QR</button>
+        </>
+      ) : (
+        <button type="button" disabled={loading} onClick={async () => {
+          setError("");
+          setLoading(true);
+          try { setQr(await api("credentials/qr")); }
+          catch (e: any) { setError(e.message); }
+          finally { setLoading(false); }
+        }}>{loading ? "Loading your credential…" : "Show my QR credential"}</button>
+      )}
+    </div>
+  );
+}
 function StudentPage({ me, page }: { me: Me; page: string }) {
   const movements = useData(
       "movements",
@@ -1552,10 +1590,12 @@ function StudentPage({ me, page }: { me: Me; page: string }) {
         <dl className="profile-fields">
           <dt>Full name</dt>
           <dd>{me.user.name}</dd>
-          <dt>Registration</dt>
+          <dt>Student ID number</dt>
           <dd>{me.student?.registration}</dd>
           <dt>Email</dt>
           <dd>{me.user.email}</dd>
+          <dt>Identity verified</dt>
+          <dd>{me.student?.identityVerifiedAt ? date(me.student.identityVerifiedAt) : "Awaiting registrar verification"}</dd>
           <dt>Program</dt>
           <dd>{me.student?.program}</dd>
           <dt>Enrollment</dt>
@@ -1583,8 +1623,9 @@ function StudentPage({ me, page }: { me: Me; page: string }) {
       <div className="two-col">
         <Panel
           title="Your university ID"
-          subtitle="Secret credential values are never displayed in your account."
+          subtitle="Your personal campus QR and credential status. Issuance and identity changes are managed by the registrar."
         >
+          <PersonalStudentQr key={credentials.data?.find((c: any) => c.status === "ACTIVE")?.id || "none"} />
           <DataState query={credentials}>
             {(rows) =>
               rows.length ? (
@@ -1666,7 +1707,7 @@ function StudentPage({ me, page }: { me: Me; page: string }) {
           note="Issued and verified by the registrar"
         />
         <Stat
-          label="Registration number"
+          label="Student ID number"
           value={me.student?.registration || "Unconfirmed"}
           icon={Users}
           note={me.student?.program || "Contact student records"}
@@ -1890,11 +1931,12 @@ function Registrar({ page }: { page: string }) {
     "credentials?studentId=" + studentId,
     !!studentId,
   );
+  const selectedStudent = students.data?.find((s: any) => s.id === studentId);
   return (
     <div className="two-col wide">
       <Panel
         title="Student registry"
-        subtitle="Synthetic records · authorized identity source"
+        subtitle="Registrar-verified student numbers and official university emails"
       >
         <DataState query={students}>
           {(rows) =>
@@ -1904,7 +1946,8 @@ function Registrar({ page }: { page: string }) {
                   <thead>
                     <tr>
                       <th>Student</th>
-                      <th>Registration</th>
+                      <th>Student ID</th>
+                      <th>Identity</th>
                       <th>Enrollment</th>
                       <th />
                     </tr>
@@ -1915,8 +1958,10 @@ function Registrar({ page }: { page: string }) {
                         <td>
                           <strong>{s.user.name}</strong>
                           <small>{s.program}</small>
+                          <small>{s.user.email}</small>
                         </td>
                         <td>{s.registration}</td>
+                        <td><Badge value={s.identityVerifiedAt ? "VERIFIED" : "UNVERIFIED"} /></td>
                         <td>
                           <Badge value={s.enrollment} />
                         </td>
@@ -1967,6 +2012,23 @@ function Registrar({ page }: { page: string }) {
             >
               Clear selection
             </button>
+            <h3>Verify student ID and university email</h3>
+            <p className="body-copy">Check the university source record before confirming. Verification changes sign out existing student sessions and revoke prior QR credentials.</p>
+            <Form
+              key={studentId + selectedStudent?.registration + selectedStudent?.user.email}
+              initial={{ registration: selectedStudent?.registration || "", email: selectedStudent?.user.email || "" }}
+              fields={[
+                { name: "registration", label: "Verified student ID number", inputMode: "numeric" },
+                { name: "email", label: "Verified university email", type: "email" },
+                { name: "reason", label: "Verification source / reason", minLength: 2 },
+                { name: "verified", label: "I verified the student ID and official email against university records.", type: "checkbox" },
+              ]}
+              submit="Verify student identity"
+              onSubmit={async (d) => {
+                await api(`students/${studentId}/identity`, "PATCH", d);
+                setIssued("");
+              }}
+            />
             <Form
               key={studentId}
               fields={[
@@ -2039,8 +2101,9 @@ function Registrar({ page }: { page: string }) {
               { name: "email", label: "University email", type: "email" },
               {
                 name: "registration",
-                label: "Registration number",
-                minLength: 2,
+                label: "Student ID number",
+                inputMode: "numeric",
+                minLength: 4,
               },
               { name: "program", label: "Academic program", minLength: 2 },
               {
@@ -2049,6 +2112,7 @@ function Registrar({ page }: { page: string }) {
                 type: "password",
                 minLength: 14,
               },
+              { name: "verified", label: "I verified the student ID and official email against university records.", type: "checkbox" },
             ]}
             submit="Create student record"
             onSubmit={(d) => api("students", "POST", d)}
